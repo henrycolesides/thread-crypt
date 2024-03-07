@@ -12,6 +12,7 @@
 
 # define SALT_CHARS "./ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz"
 
+
 # define OPTIONS "i:o:hva:l:R:t:r:p:"
 
 # define ALGORITHMS "[01356byg]"
@@ -19,6 +20,7 @@
 # define DEFAULT_SEED 3
 
 # define DES_SALT_LEN 2
+# define MIN_MD5_SALT_LEN 4
 # define MAX_MD5_SALT_LEN 8
 
 # define MIN_SHA_SALT_LEN 4

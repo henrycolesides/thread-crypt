@@ -9,6 +9,7 @@
 #include <string.h>
 #include <crypt.h>
 #include <pthread.h>
+#include <stdbool.h>
 
 #include "thread_crypt.h"
 
@@ -16,30 +17,30 @@ static int is_verbose = 0;
 static FILE * op_file = NULL;
 static char *ip_string = NULL;
 static char *ip_string_alias = NULL;
-// ...
-// a plethora of global variables
+static int salt_len = 0;
+static unsigned int pseed = 3;
+static char hash_algo;
+static char output[1024] = {'\0'};	
 
 static char *read_input_file(char *);
 static char *get_next_word(void);
 static void *hash_pass(void *);
-// a couple more functions
-// see below
+static char *gen_salt(char *);
 
 int
 main(int argc, char *argv[])
 {
-	char hash_algo;	
+	pthread_t *threads = NULL;
+	int *hash_count = NULL;
     char *ip_filename = NULL;
     char *op_filename = NULL;
-	char crypt_rounds_str[20] = {'\0'};
 	char *yescrypt_params = YESCRIPT_PARMS_DEFAULT;
+	char crypt_rounds_str[20] = {'\0'};
+	long tid = 0;
     int num_threads = 1;
-	int salt_len = 0;
     int result = 0;
 	int crypt_rounds = SHA_ROUNDS_DEFAULT;
-	unsigned int pseed = 3;	
-	char output[100] = {'\0'};	
-
+	bool rounds_changed = false;
 
     {
         int opt = 0;
@@ -71,11 +72,11 @@ main(int argc, char *argv[])
             case 'R':
                 // store the seed
 				pseed = atoi(optarg);
-
-                //if (result != 1) {
-                //    fprintf(stderr, "incorrect seed %s\n", optarg);
-                //    exit(1);
-                //}
+				result = pseed % (pseed - 1);
+				if (result != 1) {
+                    fprintf(stderr, "incorrect seed %s\n", optarg);
+                    exit(1);
+                }
                 break;
             case 'a':
                 // i stored the first letter so i could use in switch statements
@@ -121,11 +122,8 @@ main(int argc, char *argv[])
                 }
                 break;
             case 'r':
-                // rounds for sha* and bcrypt
-                // ...
 				crypt_rounds = atoi(optarg);
-				//if(rounds < ) rounds = 1000;
-				//if(rounds > 999999999) rounds = 999999999;
+				rounds_changed = true;
                 break;
             case 'l':
 				salt_len = atoi(optarg);
@@ -193,19 +191,15 @@ main(int argc, char *argv[])
         salt_len = DES_SALT_LEN;
         break;
     case '1':
-		if(salt_len > MAX_MD5_SALT_LEN) salt_len = MAX_MD5_SALT_LEN;
-        // ...
-        // think about MAX_MD5_SALT_LEN
+		if(salt_len < MIN_MD5_SALT_LEN || salt_len > MAX_MD5_SALT_LEN) salt_len = MAX_MD5_SALT_LEN;
         break;
     case '5':
     case '6':
-		if(salt_len > MAX_SHA_SALT_LEN) salt_len = MAX_SHA_SALT_LEN;
-		else if(salt_len < MIN_SHA_SALT_LEN) salt_len = MIN_SHA_SALT_LEN;
+		if(salt_len < MIN_SHA_SALT_LEN || salt_len > MAX_SHA_SALT_LEN) salt_len = MAX_SHA_SALT_LEN;
         break;
     case 'y':
     case 'g':
-		if(salt_len > MAX_YES_SALT_LEN) salt_len = MAX_YES_SALT_LEN;
-		else if(salt_len < MIN_YES_SALT_LEN) salt_len = MIN_YES_SALT_LEN;
+		if(salt_len < MIN_YES_SALT_LEN || salt_len > MAX_YES_SALT_LEN) salt_len = MAX_YES_SALT_LEN;
         break;
     case 'b':
 		salt_len = MAX_BCRYPT_SALT_LEN;
@@ -219,38 +213,55 @@ main(int argc, char *argv[])
 
     // take care of the rounds
     if ((hash_algo == '5') || (hash_algo == '6')) {		// SHA ROUNDS
-		if(crypt_rounds > SHA_ROUNDS_MAX) crypt_rounds = SHA_ROUNDS_MAX;
+		if(!rounds_changed) crypt_rounds = SHA_ROUNDS_DEFAULT;
+		else if(crypt_rounds > SHA_ROUNDS_MAX) crypt_rounds = SHA_ROUNDS_MAX;
 		else if(crypt_rounds < SHA_ROUNDS_MIN) crypt_rounds = SHA_ROUNDS_MIN;
     }
     if (hash_algo == 'b') {								// BCRYPT ROUNDS
-		if(crypt_rounds == SHA_ROUNDS_DEFAULT) crypt_rounds = BCRYPT_ROUNDS_DEFAULT;
+		if(!rounds_changed) crypt_rounds = BCRYPT_ROUNDS_DEFAULT;
 		else if(crypt_rounds > BCRYPT_ROUNDS_MAX) crypt_rounds = BCRYPT_ROUNDS_MAX;
 		else if(crypt_rounds < BCRYPT_ROUNDS_MIN) crypt_rounds = BCRYPT_ROUNDS_MIN;
     }
 
-    // take care of the rounds string
-    // i have a string that represnts the string used for rounds.
-    // i want to generate it ONCE
     switch (hash_algo) {
+	case '0':
+		break;
+	case '1':
+		sprintf(output, "$1$");
+		break;
+	case '3':
+		sprintf(output, "$3$$");
+		break;
     case '5':
     case '6':
        	sprintf(crypt_rounds_str, "rounds=%d", crypt_rounds);
+		sprintf(output, "$%c$%s$", hash_algo, crypt_rounds_str);
         if (is_verbose) {
             fprintf(stderr, "Rounds = %d Rounds string %s\n", crypt_rounds
-                    , (crypt_rounds_str ? crypt_rounds_str : "none"));
+                    , (crypt_rounds_str[0] != '\0' ? crypt_rounds_str : "none"));
         }
         break;
     case 'y':
-    case 'g':
 		sprintf(crypt_rounds_str, "%s", yescrypt_params);
+		sprintf(output, "$y$%s$", crypt_rounds_str);
+    	if (is_verbose) {
+            fprintf(stderr, "y/g = Params string %s\n"
+                    , (crypt_rounds_str[0] != '\0' ? crypt_rounds_str : "none"));
+        }
+		break;
+	case 'g':
+		sprintf(crypt_rounds_str, "%s", yescrypt_params);
+		sprintf(output, "$gy$%s$", crypt_rounds_str);
         if (is_verbose) {
             fprintf(stderr, "y/g = Params string %s\n"
-                    , (crypt_rounds_str ? crypt_rounds_str : "none"));
+                    , (crypt_rounds_str[0] != '\0' ? crypt_rounds_str : "none"));
         }
         break;
     case 'b':
-       	sprintf(crypt_rounds_str, "rounds=%d", crypt_rounds);
-        if (is_verbose) {
+       	sprintf(crypt_rounds_str, "%d", crypt_rounds);
+		sprintf(output, "$2b$%s$", crypt_rounds_str);
+        
+		if (is_verbose) {
             fprintf(stderr, "bcrypt rounds %s\n", crypt_rounds_str);
         }
         break;
@@ -261,53 +272,49 @@ main(int argc, char *argv[])
         fprintf(stderr, "Length of salt = %d\n", salt_len);
     }
 	
-
-	// Output test
-	sprintf(output, "%c$%s$", hash_algo, crypt_rounds_str);
-	fprintf(stderr, "\n%s\n\n", output);
-
-
-    // read the input file as a big gulp
-    // ...
 	ip_string = read_input_file(ip_filename);
 	ip_string_alias = ip_string;
-	fprintf(stderr, "%s\n", ip_string);
 
-	char * word = NULL;
-	while((word = get_next_word()) != NULL) 
-	{
-		fprintf(stderr, "%s\n", word);
-	}
+	threads = malloc(num_threads * sizeof(pthread_t));
+	hash_count = calloc(num_threads, sizeof(int));
 
-    // allocate thread stuff
-    // ...
-    // ...
-    
 	// spin up the threads
-    // ...
+   	for(tid = 0; tid < num_threads; tid++)
+	{
+		pthread_create(&threads[tid], NULL, hash_pass, (void *)(&(hash_count[tid])));
+	}
 	
     if (is_verbose) {
         fprintf(stderr, "Threads spun up\n");
     }
-
+	
     // spin down the threads
-    if (is_verbose) {
+	for(tid = 0; tid < num_threads; tid++)
+	{
+		pthread_join(threads[tid], NULL);
+	}
+    
+
+	if (is_verbose) {
         fprintf(stderr, "Threads joined\n");
     }
-    // ...
-    
+   	
     // show per thread hash count
-    // ...
-
-    // free allocated memory
-    // ...
+	for(tid = 0; tid < num_threads; tid++)
+	{
+		fprintf(stderr, "\tthread %ld: hashes %d\n", tid, hash_count[tid]);
+	}
+    
+	// free allocated memory
 	free(ip_string_alias);
-    if (op_filename != NULL) {
+	free(threads);
+	free(hash_count);
+    
+	if (op_filename != NULL) {
         fclose(op_file);
     }
     
     pthread_exit(EXIT_SUCCESS);
-    //return EXIT_SUCCESS;
 }
 
 // big gulp
@@ -315,9 +322,8 @@ static char *
 read_input_file(char *ip_filename)
 {
     struct stat file_stat; // what would a stat structure do here?
-    char *ip_string = NULL;
+    char *loc_ip_string = NULL;
     int ipfd = -1;
-    ssize_t bytes_read = 0;
 	
 	if(lstat(ip_filename, &file_stat) != 0)
 	{
@@ -332,12 +338,12 @@ read_input_file(char *ip_filename)
 		exit(EXIT_SUCCESS);
 	}
 	
-	ip_string = calloc(file_stat.st_size + 1, sizeof(char));
-	bytes_read = read(ipfd, ip_string, file_stat.st_size * sizeof(char));
-	if(ipfd) close(ipfd);
+	loc_ip_string = calloc(file_stat.st_size + 1, sizeof(char));
 	// swallow the whole file in one swell foop
+	read(ipfd, loc_ip_string, file_stat.st_size * sizeof(char));
+	if(ipfd) close(ipfd);
     
-    return ip_string;
+    return loc_ip_string;
 }
 
 // step through the words
@@ -362,51 +368,66 @@ static void *
 hash_pass(void *arg)
 {
     struct crypt_data crypt_stuff;
-
-    memset(&crypt_stuff, 0, sizeof(crypt_stuff));
+	char * word = NULL;
+	char * settings = NULL;
+	char * final = NULL;
+	int count = 0;
+	memset(&crypt_stuff, 0, sizeof(crypt_stuff));
+	arg = (int *) arg;
 
     // loop through all the words, using get_next_word()
-    
+	while((word = get_next_word()) != NULL) 
+	{
+		settings = gen_salt(output);
+		final = crypt_rn(word, settings, &crypt_stuff, sizeof(crypt_stuff));
+		fprintf(op_file, "%s:%s\n", word, final);
+		free(settings);
+		++count;
+	}
+	*(int *)arg = count;
     pthread_exit(EXIT_SUCCESS);
 }
 
 // generate the salt/settings for each word
 
-	//	static void
-	//	gen_salt(char *settings)
-	//	{
-	//		static const char salt_chars[] = {SALT_CHARS};
-	//		static const size_t len = sizeof(salt_chars) - 1;
-	//		int rand_value = 0;
-	//		char hash_algo;
-	//		// ...
-    //
-	//		switch(hash_algo)
-	//		{
-	//		case '1':
-	//		case '5':
-	//		case '6':
-	//		case 'y':
-	//		case 'g':
-	//		case 'b':
-	//			memset(salt, 0, CRYPT_OUTPUT_SIZE);
-	//			// ...
-	//			for(int i = 0; i < salt_len; ++i) {
-	//				// ...
-	//			}
-	//			// ...
-	//			break;
-	//		case '3':
-	//			// NT ALGORITHM
-	//			// NO SALT
-	//			sprintf(salt, "$%s$", hash_str);
-	//			break;
-	//		default:
-	//			salt[0] = salt_chars[...];
-	//			salt[1] = salt_chars[...];
-	//			break;
-	//		}
-	//		if (is_verbose > 1) {
-	//			fprintf(stderr, "salt %s\n", salt);
-	//		}
-	//	}
+static char *
+gen_salt(char *settings)
+{
+	static const char salt_chars[] = {SALT_CHARS};
+	static const int len = strlen(SALT_CHARS);	
+	char * salt = calloc(salt_len + 1, sizeof(char));
+	char * ret_val = calloc(salt_len + strlen(settings) + 1, sizeof(char));
+
+	switch(hash_algo)
+	{
+	case '1':
+	case '5':
+	case '6':
+	case 'y':
+	case 'g':
+	case 'b':
+		memset(salt, 0, salt_len);
+		// ...
+		for(int i = 0; i < salt_len; ++i) {
+			salt[i] = salt_chars[rand_r(&pseed) % len];
+		}
+
+		// ...
+		break;
+	case '3':
+		// NT ALGORITHM
+		// NO SALT
+		//sprintf(salt, "$%s$", hash_str);
+		break;
+	default:
+		salt[0] = salt_chars[rand_r(&pseed) % len];
+		salt[1] = salt_chars[rand_r(&pseed) % len];
+		break;
+	}
+	if (is_verbose > 1) {
+		fprintf(stderr, "salt %s\n", salt);
+	}
+	sprintf(ret_val, "%s%s", settings, salt);
+	free(salt);
+	return ret_val;
+}
